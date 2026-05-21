@@ -1,0 +1,14 @@
+pointcloud_to_laserscan_node:
+  ros__parameters:
+    target_frame: "body"              # 输出的 scan 绑定到 body 坐标系
+    transform_tolerance: 0.1
+    min_height: 0.2                   # 只取 0.2m~1.5m 的点（过滤地面和天花板）
+    max_height: 1.5
+    angle_min: -3.14159               # -180°
+    angle_max: 3.14159                # +180°
+    angle_increment: 0.0087           # 约 0.5° 分辨率
+    scan_time: 0.1
+    range_min: 0.1
+    range_max: 30.0
+    use_inf: true
+    inf_epsilon: 1.0

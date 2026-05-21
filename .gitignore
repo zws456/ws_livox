@@ -1,0 +1,18 @@
+# Build outputs
+build/
+install/
+log/
+
+# IDE
+.vscode/
+
+# Python
+__pycache__/
+*.pyc
+
+# ROS2
+.colcon/
+
+# External dependencies (clone separately)
+src/FAST_LIO_ROS2/
+src/livox_ros_driver2/

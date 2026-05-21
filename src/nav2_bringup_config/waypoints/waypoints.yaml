@@ -1,0 +1,14 @@
+# 固定点坐标（基于 map 坐标系）
+# 从 RViz2 点击 Publish Point 后，从 /clicked_point 读取的坐标
+# 注意：AMCL 启动后，这些坐标在 map 坐标系下永久有效，与 camera_init 重置无关
+
+vending_machine:
+  x: 0.0   # 替换为实际 x 坐标
+  y: 0.0   # 替换为实际 y 坐标
+  yaw: 0.0 # 替换为实际朝向（弧度）
+
+# 可以继续添加更多固定点
+# example_point:
+#   x: 1.0
+#   y: 2.0
+#   yaw: 1.57
