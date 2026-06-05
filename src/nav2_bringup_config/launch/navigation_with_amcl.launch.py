@@ -19,6 +19,8 @@ def generate_launch_description():
     map_not_empty = PythonExpression(["'", map_yaml_file, "' != ''"])
     map_empty = PythonExpression(["'", map_yaml_file, "' == ''"])
 
+    # 坐标系统一为 body，不再需要通过 static TF 转换 body -> base_link
+
     params_file = os.path.join(nav2_config_dir, 'config', 'nav2_params.yaml')
     pc2laser_config = os.path.join(nav2_config_dir, 'config', 'pointcloud_to_laserscan.yaml')
 
@@ -43,7 +45,7 @@ def generate_launch_description():
         'fastlio.rviz'
     )
 
-    # 3. pointcloud_to_laserscan（3D 点云 → 2D scan）
+    # 3. pointcloud_to_laserscan（3D 点云 → 2D scan，输出到 base_link 水平坐标系）
     pc2laser_node = Node(
         package='pointcloud_to_laserscan',
         executable='pointcloud_to_laserscan_node',
@@ -88,6 +90,7 @@ def generate_launch_description():
             'map',
             default_value='',
             description='Full path to map yaml file to load. If empty, runs in realtime mode without AMCL.'),
+
 
         # 启动传感器 + 里程计
         IncludeLaunchDescription(PythonLaunchDescriptionSource(livox_launch_path)),

@@ -3,30 +3,32 @@
 cmd_vel_to_uart.py
 
 订阅 ROS2 /cmd_vel，通过 UART 发送运动控制数据给下位机（STM32）。
+同时读取底盘回传的遥测数据（ASCII 文本协议），发布到 ROS2 Topic。
 
-协议格式（16 字节定长帧，小端，无校验）：
+发送协议（16 字节定长帧，小端）：
     [0xAA] [0x55] [float32] [float32] [float32] [0x0D] [0x0A]
     
-默认发送内容（模式 A —— 推荐，电控同学可直接做运动学逆解）：
-    float[0] = vx     (m/s)   前进速度，正为前进
-    float[1] = vy     (m/s)   左右速度，正为左移（全向轮）
-    float[2] = omega  (rad/s) 旋转角速度，正为逆时针
-
-如需模式 B（方向 + 速度 + 转动），见代码第 70~73 行。
+接收协议（6 行 ASCII 文本，以 \n 分隔）：
+    mode:xxx
+    vx:0.00 | vy:0.00 | omega:0.00
+    m0:tgt:100 | fdb:95 | pid_out:... | kp:... | ki:... | kd:... | e:... | p:... | i:... | d:...
+    m1:tgt:100 | fdb:95 | pid_out:... | kp:... | ki:... | kd:... | e:... | p:... | i:... | d:...
+    m2:tgt:100 | fdb:95 | pid_out:... | kp:... | ki:... | kd:... | e:... | p:... | i:... | d:...
+    m3:tgt:100 | fdb:95 | pid_out:... | kp:... | ki:... | kd:... | e:... | p:... | i:... | d:...
 
 用法：
     ros2 run nav2_bringup_config cmd_vel_to_uart --ros-args -p device:=/dev/ttyUSB0
-    
-    改发送频率（默认 20Hz）：
-    ros2 run nav2_bringup_config cmd_vel_to_uart --ros-args -p publish_rate:=50.0
 """
 
 import rclpy
 from rclpy.node import Node
-from geometry_msgs.msg import Twist
+from geometry_msgs.msg import Twist, TwistStamped
+from std_msgs.msg import String
 import serial
 import struct
 import math
+import threading
+import json
 
 
 class CmdVelToUart(Node):
@@ -53,6 +55,10 @@ class CmdVelToUart(Node):
         # 订阅 Nav2 发布的 /cmd_vel
         self.sub = self.create_subscription(Twist, '/cmd_vel', self.on_cmd_vel, 10)
 
+        # 发布底盘遥测数据和反馈速度
+        self.telemetry_pub = self.create_publisher(String, '/chassis_telemetry', 10)
+        self.feedback_pub = self.create_publisher(TwistStamped, '/chassis_feedback', 10)
+
         # 固定发送频率定时器
         self.timer = self.create_timer(1.0 / publish_rate, self.timer_callback)
 
@@ -62,8 +68,17 @@ class CmdVelToUart(Node):
         self.latest_f3 = 0.0
         self.has_new_data = False
 
+        # 接收缓冲区
+        self.recv_lines = []
+        self.recv_lock = threading.Lock()
+
+        # 启动读取线程
+        self.read_thread = threading.Thread(target=self.read_loop, daemon=True)
+        self.read_thread.start()
+
         self.get_logger().info(
-            f'Subscribed to /cmd_vel, UART publish rate: {publish_rate:.1f} Hz'
+            f'Subscribed to /cmd_vel, UART publish rate: {publish_rate:.1f} Hz, '
+            f'Telemetry topics: /chassis_telemetry, /chassis_feedback'
         )
 
     def on_cmd_vel(self, msg: Twist):
@@ -72,13 +87,12 @@ class CmdVelToUart(Node):
         vy = float(msg.linear.y)
         omega = float(msg.angular.z)
 
-        # 模式 A（默认）：发笛卡尔分量 vx, vy, omega
-        self.latest_f1, self.latest_f2, self.latest_f3 = vx, vy, omega
-
-        # 模式 B（极坐标）：如果电控要"方向+速度+转动"，取消下面注释
-        # self.latest_f1 = math.atan2(vy, vx)   # heading (rad)
-        # self.latest_f2 = math.hypot(vx, vy)   # speed (m/s)
-        # self.latest_f3 = omega                # omega (rad/s)
+        # 坐标系转换：body(雷达) 相对底盘顺时针 90°
+        # body x = 底盘右方, body y = 底盘前方
+        # 底盘期望：f1=前进(vy), f2=左移(-vx)
+        self.latest_f1 = -vy      # 底盘前进 = -body y（修正方向）
+        self.latest_f2 = vx       # 底盘左移 = body x
+        self.latest_f3 = omega
 
         self.has_new_data = True
 
@@ -91,11 +105,79 @@ class CmdVelToUart(Node):
         try:
             self.ser.write(frame)
             hex_str = ' '.join(f'{b:02x}' for b in frame)
-            self.get_logger().info(
-                f'Sent Hex: {hex_str}'
-            )
+            self.get_logger().info(f'Sent Hex: {hex_str}')
         except serial.SerialException as e:
             self.get_logger().warn(f'UART write failed: {e}')
+
+    def read_loop(self):
+        """后台线程：持续读取串口回传的 ASCII 遥测数据。"""
+        while rclpy.ok():
+            try:
+                line = self.ser.readline().decode('ascii', errors='ignore').strip()
+                if not line:
+                    continue
+
+                with self.recv_lock:
+                    if line.startswith('mode:'):
+                        self.recv_lines = [line]
+                    elif self.recv_lines:
+                        self.recv_lines.append(line)
+                        if len(self.recv_lines) >= 6:
+                            self.parse_and_publish(self.recv_lines[:6])
+                            self.recv_lines = []
+            except Exception as e:
+                self.get_logger().warn(f'UART read error: {e}')
+                break
+
+    def parse_and_publish(self, lines):
+        """解析 6 行遥测数据并发布到 ROS2。"""
+        try:
+            # 第 1 行: mode:xxx
+            mode = lines[0].split(':', 1)[1].strip()
+
+            # 第 2 行: vx:0.00 | vy:0.00 | omega:0.00
+            parts = [p.strip() for p in lines[1].split('|')]
+            vx = float(parts[0].split(':', 1)[1])
+            vy = float(parts[1].split(':', 1)[1])
+            omega = float(parts[2].split(':', 1)[1])
+
+            # 第 3-6 行: m0-m3 电机数据
+            motors = []
+            for i in range(4):
+                motor_data = {}
+                for item in lines[i + 2].split(' | '):
+                    tokens = item.split(':')
+                    key = tokens[-2].strip()
+                    value = tokens[-1].strip()
+                    motor_data[key] = value
+                motors.append(motor_data)
+
+            # 发布 JSON 遥测数据
+            telemetry = {
+                'mode': mode,
+                'vx': vx,
+                'vy': vy,
+                'omega': omega,
+                'motors': motors
+            }
+            msg = String()
+            msg.data = json.dumps(telemetry, ensure_ascii=False)
+            self.telemetry_pub.publish(msg)
+
+            # 发布 TwistStamped 反馈速度
+            twist = TwistStamped()
+            twist.header.stamp = self.get_clock().now().to_msg()
+            twist.header.frame_id = 'body'
+            twist.twist.linear.x = vx
+            twist.twist.linear.y = vy
+            twist.twist.angular.z = omega
+            self.feedback_pub.publish(twist)
+
+            self.get_logger().info(
+                f'[RECV] mode={mode} vx={vx:.3f} vy={vy:.3f} omega={omega:.3f}'
+            )
+        except Exception as e:
+            self.get_logger().warn(f'Telemetry parse error: {e}')
 
     def pack_frame(self, f1: float, f2: float, f3: float) -> bytes:
         """
